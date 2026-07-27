@@ -91,6 +91,121 @@ func TestParsePrompt(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "message content as text parts",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "hi "},
+							map[string]interface{}{"type": "text", "text": "there"},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "hi there"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "message content mixes text and image parts",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "describe this"},
+							map[string]interface{}{
+								"type":      "image_url",
+								"image_url": map[string]interface{}{"url": "https://example.com/a.png"},
+							},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "describe this"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "assistant message with null content is kept",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "what is the weather",
+					},
+					map[string]interface{}{
+						"role":       "assistant",
+						"content":    nil,
+						"tool_calls": []interface{}{map[string]interface{}{"id": "call_1"}},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "what is the weather"},
+					{Role: "assistant", Content: ""},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "message content of unsupported type",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": 123,
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "text content part without text field",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text"},
+						},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message content part is not an object",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": []interface{}{"hi"},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "empty message list",
+			body: map[string]interface{}{
+				"messages": []interface{}{},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
 			name: "messages not a list",
 			body: map[string]interface{}{
 				"messages": "not a list",
