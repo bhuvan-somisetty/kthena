@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -35,6 +36,11 @@ var (
 	TTFT              = "TTFT"
 )
 
+// ErrPromptNotFound is returned when the request body carries neither a "prompt"
+// nor a "messages" field. It is distinct from a malformed prompt so that callers
+// can answer "absent" and "present but invalid" with different status codes.
+var ErrPromptNotFound = errors.New("prompt or messages not found in request body")
+
 func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: obj.GetNamespace(),
@@ -42,6 +48,10 @@ func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	}
 }
 
+// ParsePrompt extracts the prompt from a chat completions or completions request
+// body. Every error other than ErrPromptNotFound means the body is malformed: no
+// message is ever dropped silently, because a dropped message yields a prompt that
+// looks valid to the caller while no longer matching what the client sent.
 func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	if prompt, ok := body["prompt"]; ok {
 		promptStr, ok := prompt.(string)
@@ -58,22 +68,25 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 		if !ok {
 			return nil, fmt.Errorf("messages is not a list")
 		}
+		if len(messageList) == 0 {
+			return nil, fmt.Errorf("messages list is empty")
+		}
 
 		msgs := make([]common.Message, 0, len(messageList))
-		for _, message := range messageList {
+		for i, message := range messageList {
 			msgMap, ok := message.(map[string]interface{})
 			if !ok {
-				continue
+				return nil, fmt.Errorf("message at index %d is not an object", i)
 			}
 
 			role, ok := msgMap["role"].(string)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("message at index %d has no string role field", i)
 			}
 
 			content, err := parseMessageContent(msgMap["content"])
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("message at index %d: %w", i, err)
 			}
 
 			msgs = append(msgs, common.Message{
@@ -82,16 +95,12 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 			})
 		}
 
-		if len(msgs) == 0 {
-			return nil, fmt.Errorf("messages contains no usable message")
-		}
-
 		return &common.ChatMessage{
 			Messages: msgs,
 		}, nil
 	}
 
-	return nil, fmt.Errorf("prompt or messages not found in request body")
+	return nil, ErrPromptNotFound
 }
 
 // parseMessageContent extracts the text of a single chat message. The OpenAI chat
@@ -102,11 +111,17 @@ func parseMessageContent(content interface{}) (string, error) {
 	switch c := content.(type) {
 	case nil:
 		// A message with null content still occupies a turn in the conversation,
-		// so it is kept with an empty content rather than dropped.
+		// so it is kept with an empty content rather than dropped. Note that a
+		// missing "content" key also lands here, so a message that omits content
+		// entirely is kept the same way; the two are not distinguishable from the
+		// decoded map, and neither contributes any text to the prompt.
 		return "", nil
 	case string:
 		return c, nil
 	case []interface{}:
+		// Text parts are concatenated verbatim, with no separator inserted between
+		// them, which is how the server side reassembles them too. Any spacing has
+		// to come from the parts themselves.
 		var text strings.Builder
 		for _, part := range c {
 			partMap, ok := part.(map[string]interface{})

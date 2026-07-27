@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"testing"
@@ -198,6 +199,48 @@ func TestParsePrompt(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "message is not an object",
+			body: map[string]interface{}{
+				"messages": []interface{}{"hi"},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message without a role",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"content": "hi"},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message with a non-string role",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": 1, "content": "hi"},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message without a content key is kept",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": "assistant"},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "assistant", Content: ""},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "empty message list",
 			body: map[string]interface{}{
 				"messages": []interface{}{},
@@ -232,6 +275,59 @@ func TestParsePrompt(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ParsePrompt() got = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParsePromptErrorKind pins down which failures are "prompt absent" and which
+// are "prompt malformed", since the router answers the two with different status
+// codes (404 and 400 respectively).
+func TestParsePromptErrorKind(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         map[string]interface{}
+		wantNotFound bool
+	}{
+		{
+			name:         "neither prompt nor messages",
+			body:         map[string]interface{}{"foo": "bar"},
+			wantNotFound: true,
+		},
+		{
+			name:         "messages is not a list",
+			body:         map[string]interface{}{"messages": "not a list"},
+			wantNotFound: false,
+		},
+		{
+			name:         "empty message list",
+			body:         map[string]interface{}{"messages": []interface{}{}},
+			wantNotFound: false,
+		},
+		{
+			name: "malformed content",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": "user", "content": 123},
+				},
+			},
+			wantNotFound: false,
+		},
+		{
+			name:         "prompt is not a string",
+			body:         map[string]interface{}{"prompt": 123},
+			wantNotFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParsePrompt(tt.body)
+			if err == nil {
+				t.Fatalf("ParsePrompt() error = nil, want an error")
+			}
+			if got := errors.Is(err, ErrPromptNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrPromptNotFound) = %v, want %v (err = %v)", got, tt.wantNotFound, err)
 			}
 		})
 	}
