@@ -45,6 +45,64 @@ func TestNIXLConnector(t *testing.T) {
 	}
 }
 
+func TestLMCacheConnector(t *testing.T) {
+	connector := NewLMCacheConnector()
+
+	if connector.Name() != "lmcache" {
+		t.Errorf("Expected LMCache connector name 'lmcache', got '%s'", connector.Name())
+	}
+
+	// LMCacheConnectorV1 follows vLLM's KVConnectorBase_V1 contract, so it must
+	// relay kv_transfer_params from the prefill response to the decode request
+	// the same way NIXLConnector does.
+	lmcacheConn, ok := connector.(*NIXLConnector)
+	if !ok {
+		t.Fatalf("Expected LMCache connector to reuse the NIXL kv_transfer_params relay implementation, got %T", connector)
+	}
+
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+
+	reqBody := map[string]interface{}{
+		"model":      "test-model",
+		"max_tokens": 100,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":    "user",
+				"content": "test message",
+			},
+		},
+	}
+
+	// The connector will fail due to network/connection issues, but the prefill
+	// request should still be built with kv_transfer_params before that failure.
+	if _, err := lmcacheConn.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil); err == nil {
+		t.Error("Expected LMCache connector Proxy to return error due to network/connection issues")
+	}
+
+	if lmcacheConn.prefillRequest == nil {
+		t.Fatal("Expected prefill request to be built")
+	}
+
+	prefillBody, err := parseRequestBody(lmcacheConn.prefillRequest)
+	if err != nil {
+		t.Fatalf("Failed to parse prefill request body: %v", err)
+	}
+
+	kvTransferParams, ok := prefillBody["kv_transfer_params"]
+	if !ok {
+		t.Fatal("Expected prefill request to have kv_transfer_params field")
+	}
+	params, ok := kvTransferParams.(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected kv_transfer_params to be a map")
+	}
+	if doRemoteDecode, ok := params["do_remote_decode"]; !ok || doRemoteDecode != true {
+		t.Errorf("Expected do_remote_decode to be true, got %v", doRemoteDecode)
+	}
+}
+
 func TestFactory(t *testing.T) {
 	factory := NewDefaultFactory()
 
@@ -66,13 +124,13 @@ func TestFactory(t *testing.T) {
 		t.Errorf("Expected NIXL connector name 'nixl', got '%s'", nixlConnector.Name())
 	}
 
-	// Test LMCache connector (currently uses HTTP implementation)
+	// Test LMCache connector (relays kv_transfer_params like NIXL)
 	lmcacheConnector := factory.GetConnector(v1alpha1.ConnectorTypeLMCache)
 	if lmcacheConnector == nil {
 		t.Error("Expected LMCache connector to be registered")
 	}
-	if lmcacheConnector != nil && lmcacheConnector.Name() != "default" {
-		t.Errorf("Expected LMCache connector name 'default' (using HTTP implementation), got '%s'", lmcacheConnector.Name())
+	if lmcacheConnector != nil && lmcacheConnector.Name() != "lmcache" {
+		t.Errorf("Expected LMCache connector name 'lmcache', got '%s'", lmcacheConnector.Name())
 	}
 
 	// Test unknown connector type

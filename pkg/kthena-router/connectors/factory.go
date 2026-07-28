@@ -50,7 +50,7 @@ func NewDefaultFactory() *Factory {
 
 	// Register default connectors
 	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeHTTP, NewHTTPConnector)
-	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeLMCache, NewHTTPConnector)      // LMCache uses HTTP connector for now
+	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeLMCache, NewLMCacheConnector)   // LMCacheConnectorV1 uses the same kv_transfer_params contract as NIXL
 	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeMoonCake, NewMoonCakeConnector) // MoonCakeConnector in vllm-ascend
 	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeNIXL, NewNIXLConnector)
 	factory.RegisterConnectorBuilder(ConnectorTypeSGLang, NewSGLangConnector) // SGLang disaggregated prefill-decode (internal, not user-configurable)
