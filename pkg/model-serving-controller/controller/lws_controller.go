@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -364,17 +365,25 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 }
 
 func (c *LWSController) updateLWSStatus(ctx context.Context, lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServing) error {
-	newStatus := lws.Status.DeepCopy()
-	newStatus.Replicas = ms.Status.Replicas
-	newStatus.ReadyReplicas = ms.Status.AvailableReplicas
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestLWS, getErr := c.lwsLister.LeaderWorkerSets(lws.Namespace).Get(lws.Name)
+		if getErr != nil {
+			return getErr
+		}
 
-	if !reflect.DeepEqual(lws.Status, *newStatus) {
-		lwsCopy := lws.DeepCopy()
+		newStatus := latestLWS.Status.DeepCopy()
+		newStatus.Replicas = ms.Status.Replicas
+		newStatus.ReadyReplicas = ms.Status.AvailableReplicas
+
+		if reflect.DeepEqual(latestLWS.Status, *newStatus) {
+			return nil
+		}
+
+		lwsCopy := latestLWS.DeepCopy()
 		lwsCopy.Status = *newStatus
-		_, err := c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lws.Namespace).UpdateStatus(ctx, lwsCopy, metav1.UpdateOptions{})
+		_, err := c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lwsCopy.Namespace).UpdateStatus(ctx, lwsCopy, metav1.UpdateOptions{})
 		return err
-	}
-	return nil
+	})
 }
 
 func ResourceExists(client kubernetes.Interface, groupVersion string, kind string) (bool, error) {

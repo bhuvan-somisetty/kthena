@@ -44,6 +44,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 )
 
@@ -511,85 +512,92 @@ func getRoleReplica(modelServing *workload.ModelServing, roleName string) (int, 
 // reconcile. Ready reports the overall reconcile result, while TargetFound only
 // reports whether the referenced ModelServing and configured roles were resolved.
 func (ac *AutoscaleController) updateDisaggregatedPolicyStatus(ctx context.Context, policy *workload.AutoscalingPolicy, result *autoscaler.DisaggregatedScaleResult, reconcileErr error, targetFound bool) error {
-	policyCopy := &workload.AutoscalingPolicy{
-		TypeMeta:   policy.TypeMeta,
-		ObjectMeta: *policy.ObjectMeta.DeepCopy(),
-		Status:     *policy.Status.DeepCopy(),
-	}
-	policyCopy.Status.ObservedGeneration = policy.Generation
-	policyCopy.Status.HomogeneousStatus = nil
-	policyCopy.Status.HeterogeneousStatus = nil
-	policyCopy.Status.DisaggregatedStatus = nil
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestPolicy, getErr := ac.autoscalingPoliciesLister.AutoscalingPolicies(policy.Namespace).Get(policy.Name)
+		if getErr != nil {
+			return getErr
+		}
 
-	readyCondition := metav1.Condition{
-		Type:               "Ready",
-		ObservedGeneration: policy.Generation,
-		LastTransitionTime: metav1.Now(),
-	}
-	targetFoundCondition := metav1.Condition{
-		Type:               "TargetFound",
-		ObservedGeneration: policy.Generation,
-		LastTransitionTime: metav1.Now(),
-	}
-	if reconcileErr != nil {
-		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "ReconcileFailed"
-		readyCondition.Message = reconcileErr.Error()
-	} else {
-		readyCondition.Status = metav1.ConditionTrue
-		readyCondition.Reason = "Reconciled"
-		readyCondition.Message = "disaggregated autoscaling policy reconciled"
-	}
-	if targetFound {
-		targetFoundCondition.Status = metav1.ConditionTrue
-		targetFoundCondition.Reason = "TargetFound"
-		targetFoundCondition.Message = "target model serving and roles found"
-	} else {
-		targetFoundCondition.Status = metav1.ConditionFalse
-		targetFoundCondition.Reason = "TargetInvalid"
+		policyCopy := &workload.AutoscalingPolicy{
+			TypeMeta:   latestPolicy.TypeMeta,
+			ObjectMeta: *latestPolicy.ObjectMeta.DeepCopy(),
+			Status:     *latestPolicy.Status.DeepCopy(),
+		}
+		policyCopy.Status.ObservedGeneration = latestPolicy.Generation
+		policyCopy.Status.HomogeneousStatus = nil
+		policyCopy.Status.HeterogeneousStatus = nil
+		policyCopy.Status.DisaggregatedStatus = nil
+
+		readyCondition := metav1.Condition{
+			Type:               "Ready",
+			ObservedGeneration: latestPolicy.Generation,
+			LastTransitionTime: metav1.Now(),
+		}
+		targetFoundCondition := metav1.Condition{
+			Type:               "TargetFound",
+			ObservedGeneration: latestPolicy.Generation,
+			LastTransitionTime: metav1.Now(),
+		}
 		if reconcileErr != nil {
-			targetFoundCondition.Message = reconcileErr.Error()
+			readyCondition.Status = metav1.ConditionFalse
+			readyCondition.Reason = "ReconcileFailed"
+			readyCondition.Message = reconcileErr.Error()
 		} else {
-			targetFoundCondition.Message = "target model serving or configured roles were not found"
+			readyCondition.Status = metav1.ConditionTrue
+			readyCondition.Reason = "Reconciled"
+			readyCondition.Message = "disaggregated autoscaling policy reconciled"
 		}
-	}
-	meta.SetStatusCondition(&policyCopy.Status.Conditions, readyCondition)
-	meta.SetStatusCondition(&policyCopy.Status.Conditions, targetFoundCondition)
-
-	if result != nil {
-		roleStatuses := make([]workload.TargetScalingStatus, 0, len(result.Roles))
-		prevLastScaleTimeByRole := map[string]*metav1.Time{}
-		if policy.Status.DisaggregatedStatus != nil {
-			for _, prev := range policy.Status.DisaggregatedStatus.Roles {
-				prevLastScaleTimeByRole[prev.Name] = prev.LastScaleTime
+		if targetFound {
+			targetFoundCondition.Status = metav1.ConditionTrue
+			targetFoundCondition.Reason = "TargetFound"
+			targetFoundCondition.Message = "target model serving and roles found"
+		} else {
+			targetFoundCondition.Status = metav1.ConditionFalse
+			targetFoundCondition.Reason = "TargetInvalid"
+			if reconcileErr != nil {
+				targetFoundCondition.Message = reconcileErr.Error()
+			} else {
+				targetFoundCondition.Message = "target model serving or configured roles were not found"
 			}
 		}
-		now := metav1.Now()
-		for _, role := range result.Roles {
-			lastScaleTime := prevLastScaleTimeByRole[role.Name]
-			if reconcileErr == nil && role.CurrentReplicas != role.FinalReplicas {
-				lastScaleTime = &now
-			}
-			roleStatuses = append(roleStatuses, workload.TargetScalingStatus{
-				Name:            role.Name,
-				CurrentReplicas: role.CurrentReplicas,
-				DesiredReplicas: role.DesiredReplicas,
-				Mode:            role.Mode,
-				LastScaleTime:   lastScaleTime,
-			})
-		}
-		policyCopy.Status.DisaggregatedStatus = &workload.DisaggregatedScalingStatus{
-			Roles:         roleStatuses,
-			RatioStatus:   result.RatioStatus,
-			RatioAdjusted: result.RatioAdjusted,
-		}
-	}
+		meta.SetStatusCondition(&policyCopy.Status.Conditions, readyCondition)
+		meta.SetStatusCondition(&policyCopy.Status.Conditions, targetFoundCondition)
 
-	if equality.Semantic.DeepEqual(policy.Status, policyCopy.Status) {
-		return nil
-	}
-	_, err := ac.client.WorkloadV1alpha1().AutoscalingPolicies(policy.Namespace).UpdateStatus(ctx, policyCopy, metav1.UpdateOptions{})
-	return err
+		if result != nil {
+			roleStatuses := make([]workload.TargetScalingStatus, 0, len(result.Roles))
+			prevLastScaleTimeByRole := map[string]*metav1.Time{}
+			if latestPolicy.Status.DisaggregatedStatus != nil {
+				for _, prev := range latestPolicy.Status.DisaggregatedStatus.Roles {
+					prevLastScaleTimeByRole[prev.Name] = prev.LastScaleTime
+				}
+			}
+			now := metav1.Now()
+			for _, role := range result.Roles {
+				lastScaleTime := prevLastScaleTimeByRole[role.Name]
+				if reconcileErr == nil && role.CurrentReplicas != role.FinalReplicas {
+					lastScaleTime = &now
+				}
+				roleStatuses = append(roleStatuses, workload.TargetScalingStatus{
+					Name:            role.Name,
+					CurrentReplicas: role.CurrentReplicas,
+					DesiredReplicas: role.DesiredReplicas,
+					Mode:            role.Mode,
+					LastScaleTime:   lastScaleTime,
+				})
+			}
+			policyCopy.Status.DisaggregatedStatus = &workload.DisaggregatedScalingStatus{
+				Roles:         roleStatuses,
+				RatioStatus:   result.RatioStatus,
+				RatioAdjusted: result.RatioAdjusted,
+			}
+		}
+
+		if equality.Semantic.DeepEqual(latestPolicy.Status, policyCopy.Status) {
+			return nil
+		}
+		_, err := ac.client.WorkloadV1alpha1().AutoscalingPolicies(policyCopy.Namespace).UpdateStatus(ctx, policyCopy, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func formatAutoscalerMapKey(policyNamespace, policyName string, targetRef *corev1.ObjectReference) string {
