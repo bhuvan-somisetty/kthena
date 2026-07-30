@@ -32,6 +32,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	"istio.io/istio/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -512,8 +513,21 @@ func getRoleReplica(modelServing *workload.ModelServing, roleName string) (int, 
 // reconcile. Ready reports the overall reconcile result, while TargetFound only
 // reports whether the referenced ModelServing and configured roles were resolved.
 func (ac *AutoscaleController) updateDisaggregatedPolicyStatus(ctx context.Context, policy *workload.AutoscalingPolicy, result *autoscaler.DisaggregatedScaleResult, reconcileErr error, targetFound bool) error {
+	// Status updates within a single reconcile can happen back to back, and the
+	// informer cache does not always catch up between them. Read from the cache
+	// on the first attempt (cheap, and correct in the common case); if that
+	// attempt conflicts, the cache is known to be stale for this object, so
+	// subsequent attempts read directly from the API server instead of retrying
+	// against the same stale resourceVersion.
+	readFromAPI := false
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latestPolicy, getErr := ac.autoscalingPoliciesLister.AutoscalingPolicies(policy.Namespace).Get(policy.Name)
+		var latestPolicy *workload.AutoscalingPolicy
+		var getErr error
+		if readFromAPI {
+			latestPolicy, getErr = ac.client.WorkloadV1alpha1().AutoscalingPolicies(policy.Namespace).Get(ctx, policy.Name, metav1.GetOptions{})
+		} else {
+			latestPolicy, getErr = ac.autoscalingPoliciesLister.AutoscalingPolicies(policy.Namespace).Get(policy.Name)
+		}
 		if getErr != nil {
 			return getErr
 		}
@@ -596,7 +610,14 @@ func (ac *AutoscaleController) updateDisaggregatedPolicyStatus(ctx context.Conte
 			return nil
 		}
 		_, err := ac.client.WorkloadV1alpha1().AutoscalingPolicies(policyCopy.Namespace).UpdateStatus(ctx, policyCopy, metav1.UpdateOptions{})
-		return err
+		if err != nil {
+			if apierrors.IsConflict(err) {
+				klog.V(4).Infof("AutoscalingPolicy %s/%s status update conflicted (informer cache may be stale), retrying with a fresh read from the API server: %v", policyCopy.Namespace, policyCopy.Name, err)
+				readFromAPI = true
+			}
+			return err
+		}
+		return nil
 	})
 }
 

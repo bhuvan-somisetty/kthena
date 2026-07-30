@@ -365,8 +365,21 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 }
 
 func (c *LWSController) updateLWSStatus(ctx context.Context, lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServing) error {
+	// Status updates within a single reconcile can happen back to back, and the
+	// informer cache does not always catch up between them. Read from the cache
+	// on the first attempt (cheap, and correct in the common case); if that
+	// attempt conflicts, the cache is known to be stale for this object, so
+	// subsequent attempts read directly from the API server instead of retrying
+	// against the same stale resourceVersion.
+	readFromAPI := false
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latestLWS, getErr := c.lwsLister.LeaderWorkerSets(lws.Namespace).Get(lws.Name)
+		var latestLWS *lwsv1.LeaderWorkerSet
+		var getErr error
+		if readFromAPI {
+			latestLWS, getErr = c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lws.Namespace).Get(ctx, lws.Name, metav1.GetOptions{})
+		} else {
+			latestLWS, getErr = c.lwsLister.LeaderWorkerSets(lws.Namespace).Get(lws.Name)
+		}
 		if getErr != nil {
 			return getErr
 		}
@@ -382,7 +395,14 @@ func (c *LWSController) updateLWSStatus(ctx context.Context, lws *lwsv1.LeaderWo
 		lwsCopy := latestLWS.DeepCopy()
 		lwsCopy.Status = *newStatus
 		_, err := c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lwsCopy.Namespace).UpdateStatus(ctx, lwsCopy, metav1.UpdateOptions{})
-		return err
+		if err != nil {
+			if errors.IsConflict(err) {
+				klog.V(4).Infof("LeaderWorkerSet %s/%s status update conflicted (informer cache may be stale), retrying with a fresh read from the API server: %v", lwsCopy.Namespace, lwsCopy.Name, err)
+				readFromAPI = true
+			}
+			return err
+		}
+		return nil
 	})
 }
 
