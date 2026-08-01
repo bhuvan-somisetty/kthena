@@ -134,8 +134,6 @@ func TestNewAutoscaleControllerSyncPeriodFallback(t *testing.T) {
 func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	ns := "ns"
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(3)}}
-	client := clientfake.NewSimpleClientset(ms)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
 
 	srv := httptest.NewServer(httpHandlerWithBody("load 1\n"))
 	defer srv.Close()
@@ -146,23 +144,31 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 100, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 100}}}
 
+	client := clientfake.NewSimpleClientset(ms, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
-	if len(client.Fake.Actions()) != 0 {
-		t.Fatalf("expected no update actions with tolerance=100, got %d", len(client.Fake.Actions()))
+	msUpdates := 0
+	for _, a := range client.Fake.Actions() {
+		if (a.GetVerb() == "update" || a.GetVerb() == "patch") && a.GetResource().Resource == "modelservings" {
+			msUpdates++
+		}
+	}
+	if msUpdates != 0 {
+		t.Fatalf("expected no modelserving update actions with tolerance=100, got %d", msUpdates)
 	}
 }
 
 func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	ns := "ns"
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-up", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
-	client := clientfake.NewSimpleClientset(ms)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
 
 	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
 	defer srv.Close()
@@ -173,9 +179,13 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-up"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
 
+	client := clientfake.NewSimpleClientset(ms, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
@@ -193,8 +203,6 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	ns := "ns"
 	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
 	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-b", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
-	client := clientfake.NewSimpleClientset(msA, msB)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
 
 	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
 	defer srv.Close()
@@ -207,10 +215,14 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	var threshold int32 = 200
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
 
+	client := clientfake.NewSimpleClientset(msA, msB, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
@@ -230,8 +242,6 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	ns := "ns"
 	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a2", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
 	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-b2", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
-	client := clientfake.NewSimpleClientset(msA, msB)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
 
 	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 100\n"))
 	defer srv.Close()
@@ -244,10 +254,14 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	var threshold int32 = 200
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
 
+	client := clientfake.NewSimpleClientset(msA, msB, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
