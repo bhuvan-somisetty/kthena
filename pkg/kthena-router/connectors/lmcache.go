@@ -16,9 +16,14 @@ limitations under the License.
 
 package connectors
 
-// NewLMCacheConnector creates a new LMCache connector.
-// vLLM's LMCacheConnectorV1 implements the generic KVConnectorBase_V1 contract:
-// the prefill request returns kv_transfer_params, which must be forwarded on the
+// NewLMCacheConnector creates a new LMCache connector for vLLM's in-process,
+// NIXL-based disaggregated prefill mode (kv_connector: LMCacheConnectorV1).
+// It is not for LMCache's multi-process mode (LMCacheMPConnector), which runs
+// KV storage as a standalone `lmcache server` and does not go through this
+// prefill/decode HTTP relay at all.
+//
+// LMCacheConnectorV1 implements the generic KVConnectorBase_V1 contract: the
+// prefill request returns kv_transfer_params, which must be forwarded on the
 // decode request for the decode side to actually reuse the KV cache produced by
 // prefill. This is the same contract NixlConnector already implements, so we
 // reuse it here instead of falling back to the plain HTTP connector, which never

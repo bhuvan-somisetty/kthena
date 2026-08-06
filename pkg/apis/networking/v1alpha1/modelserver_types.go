@@ -106,7 +106,7 @@ type KVConnectorType string
 const (
 	ConnectorTypeHTTP     KVConnectorType = "http"     // Passthrough without mutating prefil/decode requests
 	ConnectorTypeNIXL     KVConnectorType = "nixl"     // Indicates `NixlConnector` in vllm
-	ConnectorTypeLMCache  KVConnectorType = "lmcache"  // Indicates `LmcacheConnector` in vllm
+	ConnectorTypeLMCache  KVConnectorType = "lmcache"  // Indicates `LMCacheConnectorV1` (NIXL-based disaggregated prefill) in vllm, not the multi-process `LMCacheMPConnector`
 	ConnectorTypeMoonCake KVConnectorType = "mooncake" // Indicates `MoonCakeConnector` in vllm-ascend
 )
 
