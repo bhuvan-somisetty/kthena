@@ -150,7 +150,7 @@ func (n *NIXLConnector) prefill(req *http.Request, prefillAddr string) (interfac
 	}
 	kvTransferParams, ok := prefillerResponse["kv_transfer_params"]
 	if !ok {
-		klog.Warning("NIXL: missing 'kv_transfer_params' in prefill response")
+		klog.Warningf("%s: missing 'kv_transfer_params' in prefill response", n.name)
 	}
 	return kvTransferParams, nil
 }
