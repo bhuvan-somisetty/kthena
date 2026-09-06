@@ -2241,12 +2241,13 @@ func (c *ModelServingController) getPodGroupsByIndex(indexName, indexValue strin
 
 // UpdateModelServingStatus update replicas in modelServing status.
 func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.ModelServing, revision string) error {
-	// Status updates within a single reconcile can happen back to back, and the
-	// informer cache does not always catch up between them. Read from the cache
-	// on the first attempt (cheap, and correct in the common case); if that
-	// attempt conflicts, the cache is known to be stale for this object, so
-	// subsequent attempts read directly from the API server instead of retrying
-	// against the same stale resourceVersion.
+	// Other actors (the autoscaler, LWS/ModelBooster handlers) can write to this
+	// object concurrently, and the informer cache does not always catch up before
+	// our own UpdateStatus call lands. Read from the cache on the first attempt
+	// (cheap, and correct in the common case); if that attempt conflicts, the
+	// cache is known to be stale for this object, so subsequent attempts read
+	// directly from the API server instead of retrying against the same stale
+	// resourceVersion.
 	readFromAPI := false
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var latestMS *workloadv1alpha1.ModelServing
